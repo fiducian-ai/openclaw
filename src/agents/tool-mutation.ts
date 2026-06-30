@@ -132,6 +132,17 @@ const READ_ONLY_SHELL_COMMANDS = new Set([
 const READ_ONLY_GH_PR_SUBCOMMANDS = new Set(["checks", "diff", "list", "status", "view"]);
 const READ_ONLY_GH_ISSUE_SUBCOMMANDS = new Set(["list", "status", "view"]);
 
+const GH_GLOBAL_BOOLEAN_FLAGS = new Set(["--help", "--version"]);
+const GH_GLOBAL_VALUE_FLAGS = new Set([
+  "--config",
+  "--git-protocol",
+  "--hostname",
+  "--paginate",
+  "--repo",
+  "--template",
+]);
+const GH_GLOBAL_SHORT_VALUE_FLAGS = new Set(["-r"]);
+
 const UNSAFE_RG_FLAGS = new Set(["--hostname-bin", "--pre", "--pre-glob", "--search-zip", "-z"]);
 const UNSAFE_RG_VALUE_FLAGS = ["--hostname-bin", "--pre", "--pre-glob"] as const;
 const SHELL_EXPANSION_CHARS = new Set(["$", "*", "?", "[", "]", "{", "}", "~"]);
@@ -266,21 +277,85 @@ function hasUnsafeRipgrepFlag(tokens: readonly string[]): boolean {
   });
 }
 
+function hasUnsafeGhFlag(tokens: readonly string[]): boolean {
+  return tokens.slice(1).some((token) => {
+    const normalized = normalizeLowercaseStringOrEmpty(token);
+    return (
+      normalized === "--web" ||
+      normalized.startsWith("--web=") ||
+      /^-[a-z]*w[a-z]*(?:=.*)?$/.test(normalized)
+    );
+  });
+}
+
+function isGhValueFlag(token: string): boolean {
+  const normalized = normalizeLowercaseStringOrEmpty(token);
+  if (GH_GLOBAL_SHORT_VALUE_FLAGS.has(normalized)) {
+    return true;
+  }
+  const longFlag = normalized.split("=", 1)[0] ?? "";
+  return GH_GLOBAL_VALUE_FLAGS.has(longFlag) && !normalized.includes("=");
+}
+
+function isGhSelfContainedGlobalFlag(token: string): boolean {
+  const normalized = normalizeLowercaseStringOrEmpty(token);
+  if (GH_GLOBAL_BOOLEAN_FLAGS.has(normalized)) {
+    return true;
+  }
+  const longFlag = normalized.split("=", 1)[0] ?? "";
+  return GH_GLOBAL_VALUE_FLAGS.has(longFlag) && normalized.includes("=");
+}
+
+function skipGhKnownGlobalFlags(tokens: readonly string[], startIndex: number): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index] ?? "";
+    if (token === "--") {
+      return index + 1;
+    }
+    if (isGhSelfContainedGlobalFlag(token)) {
+      index += 1;
+      continue;
+    }
+    if (isGhValueFlag(token)) {
+      index += 2;
+      continue;
+    }
+    return index;
+  }
+  return index;
+}
+
+function extractGhSubcommandTokens(tokens: readonly string[]): readonly string[] {
+  const startIndex = skipGhKnownGlobalFlags(tokens, 1);
+  return tokens.slice(startIndex);
+}
+
+function extractGhAreaActionTokens(tokens: readonly string[]): {
+  area: string;
+  action: string;
+} {
+  const subcommandTokens = extractGhSubcommandTokens(tokens);
+  const area = normalizeLowercaseStringOrEmpty(subcommandTokens[0]);
+  if (area !== "pr" && area !== "issue") {
+    return {
+      area,
+      action: normalizeLowercaseStringOrEmpty(subcommandTokens[1]),
+    };
+  }
+
+  const actionIndex = skipGhKnownGlobalFlags(subcommandTokens, 1);
+  return {
+    area,
+    action: normalizeLowercaseStringOrEmpty(subcommandTokens[actionIndex]),
+  };
+}
+
 function isReadOnlyGhCommand(tokens: readonly string[]): boolean {
-  if (
-    tokens.some((token) => {
-      const normalized = normalizeLowercaseStringOrEmpty(token);
-      return (
-        normalized === "--web" ||
-        normalized.startsWith("--web=") ||
-        /^-[a-z]*w[a-z]*(?:=.*)?$/.test(normalized)
-      );
-    })
-  ) {
+  if (hasUnsafeGhFlag(tokens)) {
     return false;
   }
-  const area = normalizeLowercaseStringOrEmpty(tokens[1]);
-  const action = normalizeLowercaseStringOrEmpty(tokens[2]);
+  const { area, action } = extractGhAreaActionTokens(tokens);
   if (area === "search") {
     return action.length > 0;
   }

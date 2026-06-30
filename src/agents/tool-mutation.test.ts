@@ -47,10 +47,17 @@ describe("tool mutation helpers", () => {
     ["exec", "rg -n tool-mutation src/agents"],
     ["exec", "gh search prs --repo openclaw/openclaw tool-mutation --json number,title,state"],
     ["bash", "gh pr view 123 --repo openclaw/openclaw --json title,state"],
+    ["bash", "gh --hostname github.com pr view 123 --json title,state"],
+    ["bash", "gh --hostname=github.com pr view 123 --json title,state"],
+    ["bash", "gh -R openclaw/openclaw pr view 123 --json title,state"],
+    ["bash", "gh pr --repo openclaw/openclaw view 123 --json title,state"],
+    ["bash", "gh pr --hostname github.com view 123 --json title,state"],
   ])("treats read-only shell command as non-mutating: %s %s", (toolName, command) => {
     expect(isMutatingToolCall(toolName, { command })).toBe(false);
     expect(buildToolMutationState(toolName, { command }).mutatingAction).toBe(false);
-    expect(buildToolMutationState(toolName, { command }, command).actionFingerprint).toBeUndefined();
+    expect(
+      buildToolMutationState(toolName, { command }, command).actionFingerprint,
+    ).toBeUndefined();
   });
 
   it.each([
@@ -87,6 +94,15 @@ describe("tool mutation helpers", () => {
     ["exec", "git grep --ext-grep pattern"],
     ["exec", "git grep --open-files-in-pager=vim pattern"],
     ["exec", "gh pr create --title fix --body body"],
+    ["exec", "gh --hostname github.com pr create --title x"],
+    ["exec", "gh --config /tmp/gh-config pr create --title x"],
+    ["exec", "gh --git-protocol ssh pr create --title x"],
+    ["exec", "gh --paginate never pr create --title x"],
+    ["exec", "gh --template '{{.title}}' pr create --title x"],
+    ["exec", "gh pr --repo openclaw/openclaw create --title x"],
+    ["exec", "gh pr -R openclaw/openclaw create --title x"],
+    ["exec", "gh pr --hostname github.com create --title x"],
+    ["exec", "gh pr --hostname=github.com create --title x"],
     ["exec", "gh pr view 123 --web"],
     ["exec", "gh pr view 123 --web=true"],
     ["exec", "gh pr view 123 --web=false"],
