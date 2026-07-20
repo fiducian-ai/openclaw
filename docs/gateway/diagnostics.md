@@ -131,6 +131,18 @@ when the last bridge progress looked terminal, such as a raw response item or
 response completion event, but the Gateway still considers the embedded run
 active.
 
+Source-reply turns also emit a payload-free `message.delivery.status` event.
+That event records the source delivery mode, whether a visible reply was
+required, message-tool send counts, final-reply visibility, and whether a
+completion receipt was observed. A `message.processed` event with
+`outcome=completed` only means the runtime finished processing the inbound
+message; it is not proof that a human-visible reply was delivered. When a turn
+requires visible delivery but ends with only private/suppressed final text, the
+delivery-status event sets `completionReceipt="missing"` and `missingReceipt=true`.
+For Discord channel audits, `scripts/dev/discord-visible-reply-monitor.mjs` can
+scan recent channel history for human prompts that were not followed by a
+visible agent/bot message inside a bounded window.
+
 Inspect the live recorder:
 
 ```bash

@@ -22,6 +22,7 @@ import {
   resolveInheritedToolPolicyForSession,
   resolveSubagentToolPolicyForSession,
 } from "../../agents/agent-tools.policy.js";
+import { isMessagingToolSendAction } from "../../agents/embedded-agent-messaging.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook-helpers.js";
 import { selectAgentHarness } from "../../agents/harness/selection.js";
 import {
@@ -69,6 +70,7 @@ import { getSessionBindingService } from "../../infra/outbound/session-binding-s
 import { isAbortError } from "../../infra/unhandled-rejections.js";
 import type { StuckSessionRecoveryOutcome } from "../../logging/diagnostic-session-recovery.js";
 import {
+  logMessageDeliveryStatus,
   logMessageDispatchCompleted,
   logMessageDispatchStarted,
   isStuckSessionRecoveryEnabled,
@@ -129,6 +131,7 @@ import {
   type CommandSessionMetadataChange,
 } from "./command-session-metadata.js";
 import { resolveConversationBindingContextFromMessage } from "./conversation-binding-input.js";
+import { buildDeliveryStatus, type DeliveryStatus } from "./delivery-status.js";
 import {
   createInternalHookEvent,
   loadSessionStore,
@@ -1494,6 +1497,8 @@ export async function dispatchReplyFromConfig(
   const getQueuedFollowupAbortSignal = () =>
     dispatchReplyOperation?.abortSignal ?? params.replyOptions?.abortSignal;
   let observedReplyDelivery = false;
+  const messageToolSendToolCallIds = new Set<string>();
+  const completedMessageToolSendToolCallIds = new Set<string>();
   const markObservedReplyDelivery = async () => {
     if (observedReplyDelivery) {
       return;
@@ -1922,6 +1927,35 @@ export async function dispatchReplyFromConfig(
     suppressHookUserDelivery,
     suppressHookReplyLifecycle,
   } = sourceReplyPolicy;
+  const trackMessageToolSendStart = (payload: {
+    toolCallId?: string;
+    name?: string;
+    args?: Record<string, unknown>;
+  }) => {
+    if (sourceReplyDeliveryMode !== "message_tool_only") {
+      return;
+    }
+    if (payload.toolCallId && payload.name && payload.args) {
+      if (isMessagingToolSendAction(payload.name, payload.args)) {
+        messageToolSendToolCallIds.add(payload.toolCallId);
+      }
+    }
+  };
+  const trackMessageToolSendCompletion = (payload: {
+    toolCallId?: string;
+    name?: string;
+    status?: string;
+  }) => {
+    if (
+      sourceReplyDeliveryMode === "message_tool_only" &&
+      payload.toolCallId &&
+      payload.name === "message" &&
+      payload.status === "completed" &&
+      messageToolSendToolCallIds.has(payload.toolCallId)
+    ) {
+      completedMessageToolSendToolCallIds.add(payload.toolCallId);
+    }
+  };
   const attachSourceReplyDeliveryMode = (
     result: DispatchFromConfigResult,
   ): DispatchFromConfigResult =>
@@ -2884,9 +2918,14 @@ export async function dispatchReplyFromConfig(
           if (deliverStandaloneCommentaryProgress && payload.kind === "preamble") {
             await noteCommentaryProgress(payload);
           }
+          trackMessageToolSendCompletion(payload);
           await forwardItemEvent?.(payload);
         }
-      : undefined;
+      : (payload: Parameters<NonNullable<GetReplyOptions["onItemEvent"]>>[0]) => {
+          // Even when no channel consumes item events, delivery-status auditing
+          // still needs to observe message-tool send completions (GH-223).
+          trackMessageToolSendCompletion(payload);
+        };
     // Let draft-rendering channels yield their ephemeral commentary lines while
     // the durable verbose commentary lane is delivering the same content.
     params.replyOptions?.onVerboseProgressVisibility?.(
@@ -2927,17 +2966,32 @@ export async function dispatchReplyFromConfig(
               params.replyOptions?.onAssistantMessageStart,
             ),
             onBlockReplyQueued: wrapProgressCallback(params.replyOptions?.onBlockReplyQueued),
-            onToolStart: wrapProgressCallback(params.replyOptions?.onToolStart, {
-              allowWhenToolSummariesHidden:
-                params.replyOptions?.allowToolLifecycleWhenProgressHidden === true,
-              forwardWhenSourceDeliverySuppressed: true,
-              requiresToolSummaryVisibility: true,
-              waitForDirectBlockReplyDelivery: true,
-              onForward: async () => {
-                // Commentary precedes the tool that follows it.
-                await flushPendingCommentaryProgress();
-              },
-            }),
+            onToolStart: (() => {
+              const forwardToolStart = wrapProgressCallback(params.replyOptions?.onToolStart, {
+                allowWhenToolSummariesHidden:
+                  params.replyOptions?.allowToolLifecycleWhenProgressHidden === true,
+                forwardWhenSourceDeliverySuppressed: true,
+                requiresToolSummaryVisibility: true,
+                waitForDirectBlockReplyDelivery: true,
+                onForward: async () => {
+                  // Commentary precedes the tool that follows it.
+                  await flushPendingCommentaryProgress();
+                },
+              });
+              // Only synthesize a tool-start handler when message-tool-only
+              // delivery needs send-attempt auditing (GH-223). Otherwise keep the
+              // original capability shape so channels that expose no tool-start
+              // consumer stay tool-start-free (#ordering-item-progress guard).
+              if (sourceReplyDeliveryMode !== "message_tool_only") {
+                return forwardToolStart;
+              }
+              return async (
+                payload: Parameters<NonNullable<GetReplyOptions["onToolStart"]>>[0],
+              ) => {
+                trackMessageToolSendStart(payload);
+                await forwardToolStart?.(payload);
+              };
+            })(),
             onItemEvent,
             commentaryProgressEnabled:
               deliverStandaloneCommentaryProgress ||
@@ -3467,6 +3521,38 @@ export async function dispatchReplyFromConfig(
     await waitForPendingDirectBlockReplyDelivery(getDispatchAbortSignal());
     const counts = dispatcher.getQueuedCounts();
     counts.final += routedFinalCount;
+    const finalPayloadCount = replies.filter(
+      (reply) => reply.isReasoning !== true && hasOutboundReplyContent(reply, { trimText: true }),
+    ).length;
+    const completedMessageToolSends = Math.max(
+      completedMessageToolSendToolCallIds.size,
+      observedReplyDelivery ? 1 : 0,
+    );
+    const attemptedMessageToolSends = Math.max(
+      messageToolSendToolCallIds.size,
+      completedMessageToolSends,
+    );
+    const deliveryStatus: DeliveryStatus = buildDeliveryStatus({
+      sourceReplyDeliveryMode,
+      sendPolicyDenied,
+      observedReplyDelivery,
+      queuedFinal: queuedFinal || routedFinalCount > 0,
+      finalPayloadCount,
+      privateFinalTextPresent: finalPayloadCount > 0,
+      messageToolSends: {
+        attempted: attemptedMessageToolSends,
+        completed: completedMessageToolSends,
+      },
+      silentExpected: emptyFinalAllowedAsSilent,
+      allowEmptyAssistantReplyAsSilent: emptyFinalAllowedAsSilent,
+    });
+    logMessageDeliveryStatus({
+      channel,
+      sessionId: lifecycleSessionId,
+      sessionKey: acpDispatchSessionKey,
+      source: "replyResolver",
+      status: deliveryStatus,
+    });
     commitInboundDedupeIfClaimed();
     recordAgentDispatchCompleted("completed");
     recordProcessed(

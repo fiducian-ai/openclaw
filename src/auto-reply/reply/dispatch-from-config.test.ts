@@ -59,6 +59,7 @@ const mocks = vi.hoisted(() => ({
   })),
 }));
 const diagnosticMocks = vi.hoisted(() => ({
+  logMessageDeliveryStatus: vi.fn(),
   logMessageDispatchCompleted: vi.fn(),
   logMessageDispatchStarted: vi.fn(),
   logMessageQueued: vi.fn(),
@@ -410,6 +411,7 @@ vi.mock("./abort.runtime.js", () => ({
 }));
 
 vi.mock("../../logging/diagnostic.js", () => ({
+  logMessageDeliveryStatus: diagnosticMocks.logMessageDeliveryStatus,
   logMessageDispatchCompleted: diagnosticMocks.logMessageDispatchCompleted,
   logMessageDispatchStarted: diagnosticMocks.logMessageDispatchStarted,
   logMessageQueued: diagnosticMocks.logMessageQueued,
@@ -1024,6 +1026,7 @@ describe("dispatchReplyFromConfig", () => {
     mocks.routeReply.mockReset();
     mocks.routeReply.mockResolvedValue({ ok: true, messageId: "mock" });
     acpMocks.listAcpSessionEntries.mockReset().mockResolvedValue([]);
+    diagnosticMocks.logMessageDeliveryStatus.mockClear();
     diagnosticMocks.logMessageQueued.mockClear();
     diagnosticMocks.logMessageProcessed.mockClear();
     diagnosticMocks.logSessionStateChange.mockClear();
@@ -5985,6 +5988,45 @@ describe("dispatchReplyFromConfig", () => {
     expect(processedEvent?.channel).toBe("slack");
     expect(processedEvent?.outcome).toBe("completed");
     expect(processedEvent?.sessionKey).toBe("agent:main:main");
+  });
+
+  it("emits delivery-status diagnostics for suppressed visible replies", async () => {
+    setNoAbort();
+    const cfg = { diagnostics: { enabled: true } } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "discord",
+      Surface: "discord",
+      ChatType: "direct",
+      SessionKey: "agent:main:discord:direct:SPENCER",
+      MessageSid: "msg-1",
+      To: "discord:SPENCER",
+    });
+
+    const replyResolver = async () =>
+      ({ text: "Private final that needs visible delivery" }) satisfies ReplyPayload;
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher,
+      replyOptions: { sourceReplyDeliveryMode: "message_tool_only" },
+      replyResolver,
+    });
+
+    expect(diagnosticMocks.logMessageDeliveryStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "discord",
+        sessionKey: "agent:main:discord:direct:SPENCER",
+        source: "replyResolver",
+        status: expect.objectContaining({
+          source_delivery_mode: "message_tool_only",
+          visible_delivery_required: true,
+          final_reply_visibility: "private_suppressed",
+          completion_receipt: "missing",
+          missing_receipt: true,
+        }),
+      }),
+    );
   });
 
   it("carries the session store UUID on interactive diagnostic events", async () => {

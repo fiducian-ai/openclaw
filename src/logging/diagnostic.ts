@@ -1,5 +1,6 @@
 // Diagnostic logger records structured runtime events, timings, and health snapshots.
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import type { DeliveryStatus } from "../auto-reply/reply/delivery-status.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -793,6 +794,55 @@ export function logMessageDispatchCompleted(params: {
     outcome: params.outcome,
     reason: params.reason,
     error: params.error,
+  });
+  markActivity();
+}
+
+export function logMessageDeliveryStatus(params: {
+  channel?: string;
+  sessionId?: string;
+  sessionKey?: string;
+  source: string;
+  status: DeliveryStatus;
+}) {
+  if (!areDiagnosticsEnabledForProcess()) {
+    return;
+  }
+  const status = params.status;
+  if (diag.isEnabled(status.missing_receipt ? "warn" : "debug")) {
+    const payload = `message delivery status: channel=${params.channel ?? "unknown"} sessionId=${
+      params.sessionId ?? "unknown"
+    } sessionKey=${params.sessionKey ?? "unknown"} source=${params.source} sourceDeliveryMode=${
+      status.source_delivery_mode
+    } visibleDeliveryRequired=${status.visible_delivery_required} finalReplyVisibility=${
+      status.final_reply_visibility
+    } completionReceipt=${status.completion_receipt} messageToolSends=${
+      status.message_tool_sends.completed
+    }/${status.message_tool_sends.attempted}${
+      status.delivery_suppression_reason
+        ? ` suppression="${status.delivery_suppression_reason}"`
+        : ""
+    }`;
+    if (status.missing_receipt) {
+      diag.warn(payload);
+    } else {
+      diag.debug(payload);
+    }
+  }
+  emitDiagnosticEvent({
+    type: "message.delivery.status",
+    channel: params.channel,
+    sessionId: params.sessionId,
+    sessionKey: params.sessionKey,
+    source: params.source,
+    sourceDeliveryMode: status.source_delivery_mode,
+    visibleDeliveryRequired: status.visible_delivery_required,
+    messageToolSendsAttempted: status.message_tool_sends.attempted,
+    messageToolSendsCompleted: status.message_tool_sends.completed,
+    finalReplyVisibility: status.final_reply_visibility,
+    completionReceipt: status.completion_receipt,
+    missingReceipt: status.missing_receipt,
+    deliverySuppressionReason: status.delivery_suppression_reason,
   });
   markActivity();
 }

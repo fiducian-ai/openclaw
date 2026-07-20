@@ -204,6 +204,27 @@ export type DiagnosticMessageProcessedEvent = DiagnosticBaseEvent & {
   error?: string;
 };
 
+export type DiagnosticMessageDeliveryStatusEvent = DiagnosticBaseEvent & {
+  type: "message.delivery.status";
+  channel?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  source: string;
+  sourceDeliveryMode: "automatic" | "message_tool_only" | "unknown";
+  visibleDeliveryRequired: boolean;
+  messageToolSendsAttempted: number;
+  messageToolSendsCompleted: number;
+  finalReplyVisibility:
+    | "automatic_visible"
+    | "message_tool_visible"
+    | "private_suppressed"
+    | "intentional_silence"
+    | "none";
+  completionReceipt: "automatic_receipt" | "message_tool_receipt" | "not_required" | "missing";
+  missingReceipt: boolean;
+  deliverySuppressionReason?: string;
+};
+
 export type DiagnosticMessageDeliveryKind = "text" | "media" | "edit" | "reaction" | "other";
 
 type DiagnosticMessageDeliveryBaseEvent = DiagnosticBaseEvent & {
@@ -722,6 +743,7 @@ export type DiagnosticEventPayload =
   | DiagnosticMessageDispatchStartedEvent
   | DiagnosticMessageDispatchCompletedEvent
   | DiagnosticMessageProcessedEvent
+  | DiagnosticMessageDeliveryStatusEvent
   | DiagnosticMessageDeliveryStartedEvent
   | DiagnosticMessageDeliveryCompletedEvent
   | DiagnosticMessageDeliveryErrorEvent
