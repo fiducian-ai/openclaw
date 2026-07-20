@@ -402,9 +402,50 @@ describe("bundled channel entry shape guards", () => {
 
   it("falls back through the cached loader for package-local dist entries needing SDK aliases", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-bundled-package-dist-"));
-    const pluginDir = path.join(root, "extensions", "alpha", "dist");
+    const pluginDir = path.join(root, "dist", "extensions", "alpha", "dist");
+    fs.mkdirSync(path.join(root, "dist", "plugin-sdk"), { recursive: true });
     fs.mkdirSync(pluginDir, { recursive: true });
-    fs.writeFileSync(path.join(root, "package.json"), '{"type":"module"}\n', "utf8");
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "openclaw",
+        type: "module",
+        bin: { openclaw: "./openclaw.mjs" },
+        exports: {
+          "./plugin-sdk": "./dist/plugin-sdk/root-alias.cjs",
+          "./plugin-sdk/channel-entry-contract": "./dist/plugin-sdk/channel-entry-contract.js",
+        },
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(root, "openclaw.mjs"), "#!/usr/bin/env node\n", "utf8");
+    fs.writeFileSync(
+      path.join(root, "dist", "plugin-sdk", "root-alias.cjs"),
+      "module.exports = {};\n",
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(root, "dist", "plugin-sdk", "channel-entry-contract.js"),
+      [
+        "export function defineBundledChannelEntry(entry) {",
+        "  return {",
+        "    ...entry,",
+        "    kind: 'bundled-channel-entry',",
+        "    register() {},",
+        "    loadChannelPlugin() { return { id: entry.id, meta: { id: entry.id, label: 'Package dist Alpha' }, capabilities: {}, config: {} }; },",
+        "  };",
+        "}",
+        "export function defineBundledChannelSetupEntry(entry) {",
+        "  return {",
+        "    ...entry,",
+        "    kind: 'bundled-channel-setup-entry',",
+        "    loadSetupPlugin() { return { id: 'alpha', meta: { id: 'alpha', label: 'Package dist Alpha Setup' }, capabilities: {}, config: {} }; },",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
     fs.writeFileSync(
       path.join(pluginDir, "index.js"),
       [
@@ -415,6 +456,18 @@ describe("bundled channel entry shape guards", () => {
         "  description: 'Alpha',",
         "  importMetaUrl: import.meta.url,",
         "  plugin: { specifier: './plugin.js', exportName: 'plugin' },",
+        "});",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, "setup-entry.js"),
+      [
+        'import { defineBundledChannelSetupEntry } from "openclaw/plugin-sdk/channel-entry-contract";',
+        "export default defineBundledChannelSetupEntry({",
+        "  importMetaUrl: import.meta.url,",
+        "  plugin: { specifier: './setup-plugin.js', exportName: 'setupPlugin' },",
         "});",
         "",
       ].join("\n"),
@@ -443,14 +496,24 @@ describe("bundled channel entry shape guards", () => {
     vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
       listBundledChannelPluginMetadata: () => [
         {
-          ...alphaChannelMetadata(),
+          ...alphaChannelMetadata({ includeSetup: true }),
           source: {
-            source: path.join(root, "extensions", "alpha", "index.ts"),
-            built: path.join(root, "extensions", "alpha", "index.ts"),
+            source: path.join(root, "dist", "extensions", "alpha", "index.js"),
+            built: path.join(root, "dist", "extensions", "alpha", "index.js"),
+          },
+          setupSource: {
+            source: path.join(root, "dist", "extensions", "alpha", "setup-entry.js"),
+            built: path.join(root, "dist", "extensions", "alpha", "setup-entry.js"),
           },
         },
       ],
-      resolveBundledChannelGeneratedPath: () => path.join(pluginDir, "index.js"),
+      resolveBundledChannelGeneratedPath: (
+        _rootDir: string,
+        entry: BundledEntrySource | undefined,
+      ) =>
+        (entry?.built ?? entry?.source ?? "").includes("setup-entry")
+          ? path.join(pluginDir, "setup-entry.js")
+          : path.join(pluginDir, "index.js"),
     }));
 
     try {
@@ -460,6 +523,9 @@ describe("bundled channel entry shape guards", () => {
       );
 
       expect(bundled.getBundledChannelPlugin("alpha")?.meta.label).toBe("Package dist Alpha");
+      expect(bundled.getBundledChannelSetupPlugin("alpha")?.meta.label).toBe(
+        "Package dist Alpha Setup",
+      );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

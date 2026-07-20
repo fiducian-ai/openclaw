@@ -121,6 +121,14 @@ function isPackageLocalBundledDistModulePath(params: {
       ? [path.join(params.rootScope.pluginsDir, params.metadata.dirName, "dist")]
       : []),
     path.join(params.rootScope.packageRoot, "extensions", params.metadata.dirName, "dist"),
+    path.join(params.rootScope.packageRoot, "dist", "extensions", params.metadata.dirName, "dist"),
+    path.join(
+      params.rootScope.packageRoot,
+      "dist-runtime",
+      "extensions",
+      params.metadata.dirName,
+      "dist",
+    ),
   ];
   return distRoots.some((root) => isPathInside(root, params.modulePath));
 }
