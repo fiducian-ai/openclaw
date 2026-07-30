@@ -419,6 +419,17 @@ describe("bundled channel entry shape guards", () => {
       "utf8",
     );
     fs.writeFileSync(path.join(root, "openclaw.mjs"), "#!/usr/bin/env node\n", "utf8");
+    // Packaged extensions ship their own package.json, which becomes the nearest
+    // package.json for the entrypoint and therefore defeats Node's package
+    // self-reference resolution. Without it the fixture would resolve
+    // "openclaw/plugin-sdk/*" natively through the root exports map above, the
+    // first load would succeed, and the SDK-alias fallback under test would
+    // never run.
+    fs.writeFileSync(
+      path.join(root, "dist", "extensions", "alpha", "package.json"),
+      JSON.stringify({ name: "@openclaw/alpha", type: "module" }),
+      "utf8",
+    );
     fs.writeFileSync(
       path.join(root, "dist", "plugin-sdk", "root-alias.cjs"),
       "module.exports = {};\n",
