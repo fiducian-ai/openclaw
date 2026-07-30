@@ -124,6 +124,24 @@ type ActiveTaskWaiter = {
   timeout?: ReturnType<typeof setTimeout>;
 };
 
+/**
+ * A pool caps the combined concurrency of several lanes and can hold part of
+ * that budget in reserve for a specific member. Lanes stay independently
+ * ordered; the pool only decides whether a lane may start its next task.
+ */
+type LanePoolState = {
+  pool: string;
+  budget: number;
+  lanes: Set<string>;
+  reservations: Map<string, number>;
+};
+
+export type CommandLanePoolSpec = {
+  budget: number;
+  lanes: readonly string[];
+  reservations?: Readonly<Record<string, number>>;
+};
+
 function isExpectedNonErrorLaneFailure(err: unknown): boolean {
   return err instanceof Error && err.name === "LiveSessionModelSwitchError";
 }
@@ -148,6 +166,8 @@ function getQueueState() {
   const state = resolveGlobalSingleton(COMMAND_QUEUE_STATE_KEY, () => ({
     lanes: new Map<string, LaneState>(),
     activeTaskWaiters: new Set<ActiveTaskWaiter>(),
+    pools: new Map<string, LanePoolState>(),
+    lanePools: new Map<string, string>(),
     nextTaskId: 1,
     nextQueueSequence: 1,
   }));
@@ -159,6 +179,12 @@ function getQueueState() {
   // valid Set instead of `undefined`.
   if (!state.activeTaskWaiters) {
     state.activeTaskWaiters = new Set<ActiveTaskWaiter>();
+  }
+  if (!state.pools) {
+    state.pools = new Map<string, LanePoolState>();
+  }
+  if (!state.lanePools) {
+    state.lanePools = new Map<string, string>();
   }
   if (!state.nextQueueSequence) {
     state.nextQueueSequence = 1;
@@ -232,6 +258,66 @@ function getLaneState(lane: string): LaneState {
   };
   queueState.lanes.set(lane, created);
   return created;
+}
+
+function getLanePool(lane: string): LanePoolState | undefined {
+  const queueState = getQueueState();
+  const poolName = queueState.lanePools.get(lane);
+  return poolName ? queueState.pools.get(poolName) : undefined;
+}
+
+function getPoolLaneActiveCount(lane: string): number {
+  return getQueueState().lanes.get(lane)?.activeTaskIds.size ?? 0;
+}
+
+/**
+ * Decides whether `lane` may start one more task without breaking its pool's
+ * aggregate budget. A lane still inside its own reservation always wins a slot;
+ * otherwise it may only use capacity that is not held in reserve for a sibling.
+ * Lanes outside any pool are unconstrained, preserving existing behavior.
+ */
+function canAdmitInPool(lane: string): boolean {
+  const pool = getLanePool(lane);
+  if (!pool) {
+    return true;
+  }
+  let poolActive = 0;
+  let siblingReserveHeld = 0;
+  for (const member of pool.lanes) {
+    const active = getPoolLaneActiveCount(member);
+    poolActive += active;
+    if (member !== lane) {
+      siblingReserveHeld += Math.max(0, (pool.reservations.get(member) ?? 0) - active);
+    }
+  }
+  if (poolActive >= pool.budget) {
+    return false;
+  }
+  const ownActive = getPoolLaneActiveCount(lane);
+  if (ownActive < (pool.reservations.get(lane) ?? 0)) {
+    return true;
+  }
+  return poolActive + siblingReserveHeld < pool.budget;
+}
+
+/**
+ * A completed task frees pool capacity that a sibling lane may have been
+ * waiting on, and nothing else would wake that lane's queue.
+ */
+function drainPoolSiblings(lane: string): void {
+  const pool = getLanePool(lane);
+  if (!pool) {
+    return;
+  }
+  const queueState = getQueueState();
+  for (const member of pool.lanes) {
+    if (member === lane) {
+      continue;
+    }
+    if ((queueState.lanes.get(member)?.queue.length ?? 0) > 0) {
+      drainLane(member);
+    }
+  }
 }
 
 function completeTask(state: LaneState, taskId: number, taskGeneration: number): boolean {
@@ -471,7 +557,11 @@ function drainLane(lane: string) {
 
   const pump = () => {
     try {
-      while (state.activeTaskIds.size < state.maxConcurrent && state.queue.length > 0) {
+      while (
+        state.activeTaskIds.size < state.maxConcurrent &&
+        state.queue.length > 0 &&
+        canAdmitInPool(lane)
+      ) {
         const entry = state.queue.shift() as QueueEntry;
         const waitedMs = Date.now() - entry.enqueuedAt;
         if (waitedMs >= entry.warnAfterMs) {
@@ -504,6 +594,7 @@ function drainLane(lane: string) {
                 `lane task done: lane=${lane} durationMs=${Date.now() - startTime} active=${state.activeTaskIds.size} queued=${state.queue.length}`,
               );
               pump();
+              drainPoolSiblings(lane);
             }
             entry.resolve(result);
           } catch (err) {
@@ -521,6 +612,7 @@ function drainLane(lane: string) {
             if (completedCurrentGeneration) {
               notifyActiveTaskWaiters();
               pump();
+              drainPoolSiblings(lane);
             }
             entry.reject(err);
           }
@@ -555,6 +647,40 @@ export function setCommandLaneConcurrency(lane: string, maxConcurrent: number) {
   state.maxConcurrent = Math.max(minConcurrent, Math.floor(maxConcurrent));
   if (state.maxConcurrent > 0) {
     drainLane(cleaned);
+  }
+}
+
+/**
+ * Declares a shared concurrency budget across `spec.lanes`, optionally holding
+ * slots in reserve for named members so a latency-sensitive lane always has
+ * somewhere to land. Replaces any previous definition of the same pool.
+ */
+export function setCommandLanePool(pool: string, spec: CommandLanePoolSpec): void {
+  const queueState = getQueueState();
+  const lanes = new Set(spec.lanes.map(normalizeLane));
+  const reservations = new Map<string, number>();
+  for (const [lane, reserved] of Object.entries(spec.reservations ?? {})) {
+    const cleaned = normalizeLane(lane);
+    if (lanes.has(cleaned) && reserved > 0) {
+      reservations.set(cleaned, Math.floor(reserved));
+    }
+  }
+  for (const [lane, owner] of queueState.lanePools) {
+    if (owner === pool && !lanes.has(lane)) {
+      queueState.lanePools.delete(lane);
+    }
+  }
+  queueState.pools.set(pool, {
+    pool,
+    budget: Math.max(0, Math.floor(spec.budget)),
+    lanes,
+    reservations,
+  });
+  for (const lane of lanes) {
+    queueState.lanePools.set(lane, pool);
+  }
+  for (const lane of lanes) {
+    drainLane(lane);
   }
 }
 
