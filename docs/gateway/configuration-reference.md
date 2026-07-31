@@ -889,6 +889,7 @@ Lifetime values are data only in the first cloud-worker release; automatic enfor
     token: "shared-secret",
     path: "/hooks",
     defaultSessionKey: "hook:ingress",
+    maxConcurrent: 1,
     allowRequestSessionKey: true,
     allowedSessionKeyPrefixes: ["hook:", "hook:gmail:"],
     allowedAgentIds: ["hooks", "main"],
@@ -926,6 +927,13 @@ Validation and safety notes:
 - `hooks.path` cannot be `/`; use a dedicated subpath such as `/hooks`.
 - If `hooks.allowRequestSessionKey=true`, constrain `hooks.allowedSessionKeyPrefixes` (for example `["hook:"]`).
 - If a mapping or preset uses a templated `sessionKey`, set `hooks.allowedSessionKeyPrefixes` and `hooks.allowRequestSessionKey=true`. Static mapping keys do not require that opt-in.
+
+Concurrency (`hooks.maxConcurrent`, default `1`):
+
+- Hook agent runs execute on a dedicated `hook-dispatch` command lane, which shares one aggregate budget with cron inner work. `hooks.maxConcurrent` sets that lane's width and reserves the same number of slots for it. Total concurrency across cron and hooks is unchanged at any width — the setting repartitions the existing budget, it does not add capacity.
+- The reservation is not borrowable. Each slot given to hooks is withheld from cron inner work even while the hook lane is idle, so a width of `N` permanently reduces cron's usable concurrency by `N`. The value is clamped to leave cron at least one slot.
+- Concurrency applies across **distinct resolved session keys**. Runs resolving to the same session key are serialized before lane admission, so a width greater than the number of distinct keys in flight reserves capacity that cannot be used. Hooks that rely on `hooks.defaultSessionKey` all resolve to one key and will not run in parallel regardless of this setting.
+- Raising this above `1` allows hook runs to mutate shared state simultaneously. Only do so when concurrent runs are isolated from each other — for example, each operating on its own working directory. Widths above `1` are unsafe for hooks that write to a single shared checkout.
 
 **Endpoints:**
 

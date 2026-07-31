@@ -114,6 +114,14 @@ export type HooksConfig = {
    * budget, so raising this takes slots away from cron inner work whether or
    * not hooks are using them. Clamped to leave cron at least one slot; the
    * aggregate cap across cron and hooks is unchanged.
+   *
+   * Concurrency is achieved across DISTINCT resolved session keys. Runs that
+   * resolve to the same session key are serialized ahead of lane admission, so
+   * a width above the number of distinct keys in flight reserves capacity that
+   * cannot be used.
+   *
+   * Widths above 1 let hook runs mutate shared state at the same time. Only
+   * raise this where concurrent runs are isolated from one another.
    */
   maxConcurrent?: number;
   /**

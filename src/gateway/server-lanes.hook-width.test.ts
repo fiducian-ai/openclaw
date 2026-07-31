@@ -14,7 +14,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { enqueueCommandInLane, getCommandLaneSnapshot } from "../process/command-queue.js";
 import { resetCommandQueueStateForTest } from "../process/command-queue.test-support.js";
 import { CommandLane } from "../process/lanes.js";
-import { applyGatewayLaneConcurrency, resolveGatewayLaneConcurrency } from "./server-lanes.js";
+import {
+  applyGatewayLaneConcurrency,
+  CRON_HOOK_LANE_GROUP,
+  resolveGatewayLaneConcurrency,
+} from "./server-lanes.js";
 
 function hooksConfig(maxConcurrent?: number): OpenClawConfig {
   return {
@@ -88,6 +92,47 @@ describe("hooks.maxConcurrent", () => {
     // than not installing the group. Defend in the resolver too.
     expect(resolveGatewayLaneConcurrency(hooksConfig(0)).hookDispatch).toBe(1);
     expect(resolveGatewayLaneConcurrency(hooksConfig(-3)).hookDispatch).toBe(1);
+  });
+
+  it("publishes width and reservation as the same number at every width", () => {
+    // Nothing in the group machinery enforces this equality —
+    // `CommandLaneGroupSpec` explicitly does NOT validate reservations against
+    // the member's own width, because the two are published together and the
+    // width may not be applied yet at validation time. So a later edit that
+    // changes one and not the other would not fail anywhere: a reservation
+    // above the width silently withholds slots from cron that hooks can never
+    // claim, and a width above the reservation gets starved back down under
+    // cron load. This test is the only thing that would catch either.
+    for (const width of [1, 2, 4, 7]) {
+      publish(hooksConfig(width));
+      const snapshot = getCommandLaneSnapshot(CommandLane.HookDispatch);
+      expect(snapshot.maxConcurrent).toBe(width);
+      expect(snapshot.reservedForLane).toBe(snapshot.maxConcurrent);
+    }
+  });
+
+  it("publishes a group shape identical to pre-knob when the width is unset", () => {
+    // The sibling default test asserts the resolved NUMBER is 1. That would
+    // still pass if the published group/reservation shape drifted, which is
+    // what #116666's real-behaviour proof actually rests on — so assert the
+    // shape the queue ends up in, not just the input to it.
+    publish(hooksConfig());
+    const hook = getCommandLaneSnapshot(CommandLane.HookDispatch);
+    const cron = getCommandLaneSnapshot(CommandLane.CronNested);
+
+    expect({
+      group: hook.group,
+      groupBudget: hook.groupBudget,
+      reservedForLane: hook.reservedForLane,
+      maxConcurrent: hook.maxConcurrent,
+    }).toEqual({
+      group: CRON_HOOK_LANE_GROUP,
+      groupBudget: DEFAULT_CRON_MAX_CONCURRENT_RUNS,
+      reservedForLane: 1,
+      maxConcurrent: 1,
+    });
+    expect(cron.group).toBe(CRON_HOOK_LANE_GROUP);
+    expect(cron.groupBudget).toBe(DEFAULT_CRON_MAX_CONCURRENT_RUNS);
   });
 
   it("runs hooks concurrently up to the width without raising the aggregate cap", async () => {

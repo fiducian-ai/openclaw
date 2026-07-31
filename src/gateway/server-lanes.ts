@@ -36,6 +36,12 @@ export const CRON_HOOK_LANE_GROUP = "cron-hooks";
  * would therefore starve cron completely — the exact failure this group exists
  * to prevent, merely pointed the other way. Cron keeps at least one slot for
  * the same reason hooks are guaranteed one.
+ *
+ * `budget - 1` hardcodes cron's floor at 1. That is an assumption, not a
+ * derivation: it is the smallest floor that keeps cron schedulable at all. If
+ * cron ever needs a larger guaranteed share, this becomes a real partition and
+ * the floor belongs in config (`cron.minConcurrent` or an explicit
+ * `hooks.reservedConcurrent`) rather than being implied by this expression.
  */
 function clampHookDispatchToBudget(requested: number, budget: number): number {
   return Math.max(1, Math.min(requested, Math.max(1, budget - 1)));
@@ -45,10 +51,12 @@ export function resolveGatewayLaneConcurrency(cfg: OpenClawConfig): GatewayLaneC
   const cron = resolveCronMaxConcurrentRuns();
   return {
     cron,
-    // Clamped rather than rejected: `installCommandLaneGroup` throws when
-    // reservations exceed the budget, and that throw would fail publication of
-    // the WHOLE lane configuration. A mis-set hook width must not be able to
-    // take the gateway's cron lanes down with it.
+    // Clamped, not rejected — but NOT because rejection is unsafe. Phase 0 of
+    // `publishLaneConfiguration` validates every group before mutating anything,
+    // so an over-budget reservation fails cleanly with the previous lane state
+    // intact. The reason to clamp is that a rejection is the wrong ANSWER here:
+    // the only sensible reading of "give hooks more width than exists" is "give
+    // them as much as can exist", and refusing to boot over it helps nobody.
     hookDispatch:
       cfg.hooks?.enabled === true
         ? clampHookDispatchToBudget(resolveHookDispatchMaxConcurrent(cfg), cron)
