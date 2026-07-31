@@ -121,6 +121,8 @@ export const AUTOMATION_FIELD_HELP: Record<string, string> = {
     "Shared bearer token checked by hooks ingress for request authentication before mappings run. Treat holders as full-trust callers for the hook ingress surface, not as a separate non-owner role. Use environment substitution and rotate regularly when webhook endpoints are internet-accessible.",
   "hooks.defaultSessionKey":
     "Fallback session key used for hook deliveries when a request does not provide one through allowed channels. Use a stable but scoped key to avoid mixing unrelated automation conversations.",
+  "hooks.maxConcurrent":
+    "Number of hook agent runs allowed to execute at once, defaulting to one. Hook dispatch holds a non-borrowable reservation inside the shared cron budget, so each additional slot is permanently withheld from cron inner work even while hooks are idle; raise it only when concurrent hook throughput is worth that trade, and expect the value to be clamped so cron keeps at least one slot.",
   "hooks.allowRequestSessionKey":
     "Allows callers to supply a session key in hook requests when true, enabling caller-controlled routing. Keep false unless trusted integrators explicitly need custom session threading.",
   "hooks.allowedSessionKeyPrefixes":

@@ -6,6 +6,7 @@ import {
 // Pushes config-derived agent/cron limits into the process command queue.
 import { resolveAgentMaxConcurrent, resolveSubagentMaxConcurrent } from "../config/agent-limits.js";
 import { resolveCronMaxConcurrentRuns } from "../config/cron-limits.js";
+import { resolveHookDispatchMaxConcurrent } from "../config/hook-limits.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { publishLaneConfiguration, setCommandLaneConcurrency } from "../process/command-queue.js";
 import { CommandLane } from "../process/lanes.js";
@@ -24,16 +25,34 @@ type GatewayLaneConcurrency = {
   subagent: number;
 };
 
-/** Hook agent runs serialize against each other; the lane is one-wide by design. */
-const HOOK_DISPATCH_LANE_CONCURRENCY = 1;
-
 /** Group bounding cron inner work and hook dispatch to one shared budget. */
 export const CRON_HOOK_LANE_GROUP = "cron-hooks";
 
+/**
+ * Widest hook reservation that still leaves cron inner work a slot.
+ *
+ * The reservation is non-borrowable in both directions: whatever hooks reserve,
+ * cron can never claim. Letting `hooks.maxConcurrent` reach the full budget
+ * would therefore starve cron completely — the exact failure this group exists
+ * to prevent, merely pointed the other way. Cron keeps at least one slot for
+ * the same reason hooks are guaranteed one.
+ */
+function clampHookDispatchToBudget(requested: number, budget: number): number {
+  return Math.max(1, Math.min(requested, Math.max(1, budget - 1)));
+}
+
 export function resolveGatewayLaneConcurrency(cfg: OpenClawConfig): GatewayLaneConcurrency {
+  const cron = resolveCronMaxConcurrentRuns();
   return {
-    cron: resolveCronMaxConcurrentRuns(),
-    hookDispatch: cfg.hooks?.enabled === true ? HOOK_DISPATCH_LANE_CONCURRENCY : 0,
+    cron,
+    // Clamped rather than rejected: `installCommandLaneGroup` throws when
+    // reservations exceed the budget, and that throw would fail publication of
+    // the WHOLE lane configuration. A mis-set hook width must not be able to
+    // take the gateway's cron lanes down with it.
+    hookDispatch:
+      cfg.hooks?.enabled === true
+        ? clampHookDispatchToBudget(resolveHookDispatchMaxConcurrent(cfg), cron)
+        : 0,
     main: resolveAgentMaxConcurrent(cfg),
     subagent: resolveSubagentMaxConcurrent(cfg),
   };
@@ -81,8 +100,10 @@ export function applyGatewayLaneConcurrency(
     grouped[CommandLane.CronNested] = concurrency.cron;
   }
   if (hooksEnabled && !suspendedLaneIds.has(CommandLane.HookDispatch)) {
-    // One-wide: the guarantee is that a hook can always START under cron
-    // saturation, not that hooks run concurrently with each other.
+    // Lane width and reservation are deliberately the same number: a hook lane
+    // wider than its reservation could be starved back to the reservation under
+    // cron load, and a reservation wider than the lane would withhold slots
+    // from cron that hooks cannot actually use.
     grouped[CommandLane.HookDispatch] = concurrency.hookDispatch;
   }
   // Publish even when `grouped` is empty. With hooks off, `cron-nested` is the

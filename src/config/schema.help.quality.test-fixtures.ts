@@ -177,6 +177,7 @@ export const TARGET_KEYS = [
   "hooks.path",
   "hooks.token",
   "hooks.defaultSessionKey",
+  "hooks.maxConcurrent",
   "hooks.allowRequestSessionKey",
   "hooks.allowedSessionKeyPrefixes",
   "hooks.allowedAgentIds",

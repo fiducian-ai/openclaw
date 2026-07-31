@@ -108,6 +108,15 @@ export type HooksConfig = {
    */
   allowRequestSessionKey?: boolean;
   /**
+   * How many hook agent runs may execute concurrently. Default: 1.
+   *
+   * Hook dispatch holds a non-borrowable reservation inside the shared cron
+   * budget, so raising this takes slots away from cron inner work whether or
+   * not hooks are using them. Clamped to leave cron at least one slot; the
+   * aggregate cap across cron and hooks is unchanged.
+   */
+  maxConcurrent?: number;
+  /**
    * Optional allowlist for explicit session keys (request + mapping). Example: ["hook:"].
    * Empty/omitted means no prefix restriction.
    */

@@ -363,6 +363,7 @@ export const OpenClawSchemaShape = {
       path: z.string().optional(),
       token: z.string().optional().register(sensitive),
       defaultSessionKey: z.string().optional(),
+      maxConcurrent: z.number().int().positive().optional(),
       allowRequestSessionKey: z.boolean().optional(),
       allowedSessionKeyPrefixes: z.array(z.string()).optional(),
       allowedAgentIds: z.array(z.string()).optional(),
